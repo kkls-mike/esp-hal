@@ -49,10 +49,10 @@ use core::{
 };
 
 use crate::{
-    dma::{ChannelRx, DmaEligible, DmaError, DmaRxBuffer, PeripheralRxChannel, Rx, RxChannelFor},
+    dma::{ChannelRx, DmaEligible, DmaError, DmaRxBuffer, PeripheralRxChannel, RxChannelFor, RegisterAccess},
     gpio::{InputPin, Level, Pull},
-    i2s::master::{Error, ExtendedSignals, RegisterAccess},
-    peripheral::{Peripheral, PeripheralRef},
+    i2s::master::{Error, ExtendedSignals},
+    peripherals::{Peripherals, PeripheralRef},
     system::PeripheralClockControl,
     Blocking,
 };

@@ -414,6 +414,29 @@ pub mod trapframe {
 // be directly exposed.
 mod soc;
 
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! into_ref {
+        ($($name:ident),*) => {
+            $(
+                #[allow(unused_mut)]
+                let mut $name = $name.into_ref();
+            )*
+        }
+    }
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! into_mapped_ref {
+        ($($name:ident),*) => {
+            $(
+                #[allow(unused_mut)]
+                let mut $name = $name.map_into().into_ref();
+            )*
+        }
+    }
+
 #[cfg(is_debug_build)]
 procmacros::warning! {"
 WARNING: use --release
