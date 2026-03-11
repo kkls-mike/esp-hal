@@ -1,7 +1,18 @@
+#IF riscv
+.trap : ALIGN(4)
+{
+  _trap_section_origin = .;
+  KEEP(*(.trap));
+  *(.trap.*);
+} > RWTEXT
+#ENDIF
+
 .rwtext : ALIGN(4)
 {
   . = ALIGN (4);
   *(.rwtext.literal .rwtext .rwtext.literal.* .rwtext.*)
+  /* unconditionally add patched SPI-flash ROM functions (from esp-rom-sys) - the linker is still happy if there are none */
+  *:esp_rom_spiflash.*(.literal .literal.* .text .text.*)
   . = ALIGN(4);
 } > RWTEXT
 
@@ -17,4 +28,6 @@
   *( .wifiextrairam.* )
   *( .coexiram.* )
   . = ALIGN(4);
-} > RWTEXT AT > RODATA
+
+  _rwtext_len = . - ORIGIN(RWTEXT);
+} > RWTEXT

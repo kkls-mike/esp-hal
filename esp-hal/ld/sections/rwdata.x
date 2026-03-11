@@ -18,10 +18,17 @@
   *(.data1)
   _data_end = ABSOLUTE(.);
   . = ALIGN(4);
-} > RWDATA AT > RODATA
+} > RWDATA
 
 /* LMA of .data */
 _sidata = LOADADDR(.data);
+
+.data.wifi :
+{
+  . = ALIGN(4);
+  *( .dram1 .dram1.*)
+  . = ALIGN(4);
+} > RWDATA
 
 .bss (NOLOAD) : ALIGN(4)
 {
@@ -48,12 +55,6 @@ _sidata = LOADADDR(.data);
 {
   . = ALIGN(4);
   *(.noinit .noinit.*)
+  *(.uninit .uninit.*)
   . = ALIGN(4);
 } > RWDATA
-
-.data.wifi :
-{
-  . = ALIGN(4);
-  *( .dram1 .dram1.*)
-  . = ALIGN(4);
-} > RWDATA AT > RODATA

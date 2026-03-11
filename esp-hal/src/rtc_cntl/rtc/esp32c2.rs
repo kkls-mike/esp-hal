@@ -1,34 +1,17 @@
 use strum::FromRepr;
 
 use crate::{
+    clock::{RtcClock, RtcFastClock, RtcSlowClock},
     peripherals::{APB_CTRL, EXTMEM, LPWR, SPI0, SPI1, SYSTEM},
-    rom::regi2c_write_mask,
-    rtc_cntl::{RtcCalSel, RtcClock, RtcFastClock, RtcSlowClock},
+    rtc_cntl::RtcCalSel,
+    soc::regi2c,
 };
-
-const I2C_DIG_REG: u32 = 0x6d;
-const I2C_DIG_REG_HOSTID: u32 = 0;
-
-const I2C_ULP: u32 = 0x61;
-const I2C_ULP_HOSTID: u32 = 0;
-
-const I2C_DIG_REG_XPD_RTC_REG: u32 = 13;
-const I2C_DIG_REG_XPD_RTC_REG_MSB: u32 = 2;
-const I2C_DIG_REG_XPD_RTC_REG_LSB: u32 = 2;
-
-const I2C_DIG_REG_XPD_DIG_REG: u32 = 13;
-const I2C_DIG_REG_XPD_DIG_REG_MSB: u32 = 3;
-const I2C_DIG_REG_XPD_DIG_REG_LSB: u32 = 3;
-
-const I2C_ULP_IR_FORCE_XPD_CK: u32 = 0;
-const I2C_ULP_IR_FORCE_XPD_CK_MSB: u32 = 2;
-const I2C_ULP_IR_FORCE_XPD_CK_LSB: u32 = 2;
 
 pub(crate) fn init() {
     let rtc_cntl = LPWR::regs();
 
-    regi2c_write_mask!(I2C_DIG_REG, I2C_DIG_REG_XPD_DIG_REG, 0);
-    regi2c_write_mask!(I2C_DIG_REG, I2C_DIG_REG_XPD_RTC_REG, 0);
+    regi2c::I2C_DIG_REG_XPD_DIG_REG.write_field(0);
+    regi2c::I2C_DIG_REG_XPD_RTC_REG.write_field(0);
 
     unsafe {
         rtc_cntl
@@ -51,26 +34,24 @@ pub(crate) fn init() {
         rtc_cntl.int_clr().write(|w| w.bits(u32::MAX));
     }
 
-    regi2c_write_mask!(I2C_ULP, I2C_ULP_IR_FORCE_XPD_CK, 0);
+    regi2c::I2C_ULP_IR_FORCE_XPD_CK.write_field(0);
+
+    // from esp_clk_init:
+    // clk_ll_rc_fast_enable();
+    rtc_cntl.clk_conf().modify(|_, w| w.enb_ck8m().clear_bit());
+    rtc_cntl
+        .timer1()
+        .modify(|_, w| unsafe { w.ck8m_wait().bits(5) });
+    // esp_rom_delay_us(SOC_DELAY_RC_FAST_ENABLE);
+    crate::rom::ets_delay_us(50);
+
+    RtcClock::set_fast_freq(RtcFastClock::RcFast);
+    RtcClock::set_slow_freq(RtcSlowClock::RcSlow);
 }
 
 pub(crate) fn configure_clock() {
-    unsafe {
-        // from esp_clk_init:
-        // clk_ll_rc_fast_enable();
-        LPWR::regs()
-            .clk_conf()
-            .modify(|_, w| w.enb_ck8m().clear_bit());
-        LPWR::regs().timer1().modify(|_, w| w.ck8m_wait().bits(5));
-        // esp_rom_delay_us(SOC_DELAY_RC_FAST_ENABLE);
-        crate::rom::ets_delay_us(50);
-    }
-    RtcClock::set_fast_freq(RtcFastClock::RtcFastClock8m);
-
     let cal_val = loop {
-        RtcClock::set_slow_freq(RtcSlowClock::RtcSlowClockRtc);
-
-        let res = RtcClock::calibrate(RtcCalSel::RtcCalRtcMux, 1024);
+        let res = RtcClock::calibrate(RtcCalSel::RtcMux, 1024);
         if res != 0 {
             break res;
         }
@@ -121,24 +102,18 @@ fn power_control_init() {
 
     // Force PD APLL
     rtc_cntl.ana_conf().modify(|_, w| {
-        w.plla_force_pu()
-            .clear_bit()
-            .plla_force_pd()
-            .set_bit()
-            // Open SAR_I2C protect function to avoid SAR_I2C
-            // Reset when rtc_ldo is low.
-            .i2c_reset_por_force_pd()
-            .clear_bit()
+        w.plla_force_pu().clear_bit();
+        w.plla_force_pd().set_bit();
+        // Open SAR_I2C protect function to avoid SAR_I2C
+        // Reset when rtc_ldo is low.
+        w.i2c_reset_por_force_pd().clear_bit()
     });
 
     // Cancel BBPLL force PU if setting no force power up
     rtc_cntl.options0().modify(|_, w| {
-        w.bbpll_force_pu()
-            .clear_bit()
-            .bbpll_i2c_force_pu()
-            .clear_bit()
-            .bb_i2c_force_pu()
-            .clear_bit()
+        w.bbpll_force_pu().clear_bit();
+        w.bbpll_i2c_force_pu().clear_bit();
+        w.bb_i2c_force_pu().clear_bit()
     });
 
     rtc_cntl
@@ -186,9 +161,10 @@ fn rtc_sleep_pu() {
         w.pbus_mem_force_pu().clear_bit();
         w.agc_mem_force_pu().clear_bit()
     });
-    APB_CTRL::regs()
-        .mem_power_up()
-        .modify(|_, w| unsafe { w.sram_power_up().bits(0u8).rom_power_up().bits(0u8) });
+    APB_CTRL::regs().mem_power_up().modify(|_, w| unsafe {
+        w.sram_power_up().bits(0u8);
+        w.rom_power_up().bits(0u8)
+    });
 }
 
 // Terminology:

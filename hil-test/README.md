@@ -15,12 +15,12 @@ We use [embedded-test] as our testing framework. This allows us to write unit an
 
 ### Running Tests Locally
 
-We use [probe-rs] for flashing and running the tests on a target device, however, this **MUST** be installed from the correct revision:
+We use [probe-rs] for flashing and running the tests on a target device.
 
 ```text
 cargo install probe-rs-tools \
   --git https://github.com/probe-rs/probe-rs \
-  --rev 9bde591 --force --locked
+  --force --locked
 ```
 
 Target device **MUST** connected via its USB-Serial-JTAG port, or if unavailable (eg. ESP32, ESP32-C2, ESP32-S2) then you must connect a compatible debug probe such as an [ESP-Prog].
@@ -28,33 +28,22 @@ Target device **MUST** connected via its USB-Serial-JTAG port, or if unavailable
 You can run all tests for a given device by running the following command from the workspace root:
 
 ```shell
-cargo xtask run-tests $CHIP
+cargo xtask run tests $CHIP
 ```
 
 To run a single test on a target, run the following command from the workspace root:
 
 ```shell
 # Run GPIO tests for ESP32-C6
-cargo xtask run-tests esp32c6 --test gpio
+cargo xtask run tests esp32c6 --test gpio
 ```
 
 If you want to run a test multiple times:
 
 ```shell
 # Run GPIO tests for ESP32-C6
-cargo xtask run-tests esp32c6 --test gpio --repeat 10
+cargo xtask run tests esp32c6 --test gpio --repeat 10
 ```
-
-Another alternative way of running a single test is, from the `hil-tests` folder:
-```shell
-# Run GPIO tests for ESP32-C6
-CARGO_BUILD_TARGET=riscv32imac-unknown-none-elf \
-PROBE_RS_CHIP=esp32c6 \
-  cargo +nightly test --features=esp32c6 --test=gpio
-```
-- If the `--test` argument is omitted, then all tests will be run, independently if the tests are supported for that target, for this reason, we encourage using the `xtask` approach.
-- The build target **MUST** be specified via the `CARGO_BUILD_TARGET` environment variable or as an argument (`--target`).
-- The chip **MUST** be specified via the `PROBE_RS_CHIP` environment variable or as an argument of `probe-rs` (`--chip`).
 
 Some tests will require physical connections, please see the current [configuration in our runners].
 
@@ -81,13 +70,11 @@ Our self-hosted runners have the following setup:
   - Devkit: `ESP32-C6-DevKitC-1 V1.2` connected via USB-Serial-JTAG (`USB` port).
     - `GPIO6` and `GPIO7` are I2C pins.
     - `GPIO2` and `GPIO3` are connected.
-    - `GPIO4` and `GPIO5` are connected.
   - RPi: Raspbian 12 configured with the following [setup]
 - ESP32-H2 (`esp32h2-usb`):
   - Devkit: `ESP32-H2-DevKitM-1` connected via USB-Serial-JTAG (`USB` port).
     - `GPIO12` and `GPIO22` are I2C pins.
     - `GPIO2` and `GPIO3` are connected.
-    - `GPIO4` and `GPIO5` are connected.
   - RPi: Raspbian 12 configured with the following [setup]
 - ESP32-S2 (`esp32s2-jtag`):
   - Devkit: `ESP32-S2-Saola-1` connected via UART.
@@ -98,16 +85,12 @@ Our self-hosted runners have the following setup:
 - ESP32-S3 (`esp32s3-usb`):
   - Devkit: `ESP32-S3-DevKitC-1` connected via USB-Serial-JTAG.
     - `GPIO2` and `GPIO3` are I2C pins.
-    - `GPIO4` and `GPIO5` are connected.
-    - `GPIO1` and `GPIO21` are connected.
     - `GPIO9` and `GPIO10` are connected.
-    - `GPIO43 (TX)` and `GPIO45` are connected.
   - RPi: Raspbian 12 configured with the following [setup]
 - ESP32 (`esp32-jtag`):
   - Devkit: `ESP32-DevKitC-V4` connected via UART.
     - `GPIO32` and `GPIO33` are I2C pins.
-    - `GPIO4` and `GPIO5` are connected.
-    - `GPIO26` and `GPIO27` are connected.
+    - `GPIO2` and `GPIO4` are connected.
   - Probe: `ESP-Prog` connected with the [following connections][connection_esp32]
   - RPi: Raspbian 12 configured with the following [setup]
 
@@ -126,7 +109,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-t
 # Install dependencies
 sudo apt install -y pkg-config libudev-dev uhubctl
 # Install probe-rs
-cargo install probe-rs-tools --git https://github.com/probe-rs/probe-rs --rev 9bde591 --force
+cargo install probe-rs-tools --git https://github.com/probe-rs/probe-rs --force
 # Add the udev rules
 wget -O - https://probe.rs/files/69-probe-rs.rules | sudo tee /etc/udev/rules.d/69-probe-rs.rules > /dev/null
 # Add the user to plugdev group

@@ -6,6 +6,8 @@
 // development, and when a test fails. In these cases, you can enable
 // the `defmt` feature to get the output.
 
+esp_bootloader_esp_idf::esp_app_desc!();
+
 use esp_hal as _;
 
 #[cfg(not(feature = "defmt"))]
@@ -22,8 +24,30 @@ unsafe impl defmt::Logger for Logger {
 
 #[cfg(feature = "defmt")]
 use defmt_rtt as _;
-// Make sure esp_backtrace is not removed.
-use esp_backtrace as _;
+
+#[cfg(feature = "defmt")]
+#[macro_export]
+macro_rules! assert {
+    ($($t:tt)*) => { defmt::assert!($($t)*) }
+}
+
+#[cfg(feature = "defmt")]
+#[macro_export]
+macro_rules! assert_eq {
+    ($($t:tt)*) => { defmt::assert_eq!($($t)*) }
+}
+
+#[cfg(not(feature = "defmt"))]
+#[macro_export]
+macro_rules! assert {
+    ($($t:tt)*) => { ::core::assert!($($t)*) }
+}
+
+#[cfg(not(feature = "defmt"))]
+#[macro_export]
+macro_rules! assert_eq {
+    ($($t:tt)*) => { ::core::assert_eq!($($t)*) }
+}
 
 #[macro_export]
 macro_rules! i2c_pins {
@@ -31,7 +55,7 @@ macro_rules! i2c_pins {
         // Order: (SDA, SCL)
         cfg_if::cfg_if! {
             if #[cfg(any(esp32s2, esp32s3))] {
-                ($peripherals.GPIO2, $peripherals.GPIO3)
+                ($peripherals.GPIO3, $peripherals.GPIO2)
             } else if #[cfg(esp32)] {
                 ($peripherals.GPIO32, $peripherals.GPIO33)
             } else if #[cfg(esp32c6)] {
@@ -40,7 +64,7 @@ macro_rules! i2c_pins {
                 ($peripherals.GPIO12, $peripherals.GPIO22)
             } else if #[cfg(esp32c2)] {
                 ($peripherals.GPIO18, $peripherals.GPIO9)
-            } else {
+            } else { // esp32c3
                 ($peripherals.GPIO4, $peripherals.GPIO5)
             }
         }
@@ -54,7 +78,7 @@ macro_rules! common_test_pins {
             if #[cfg(any(esp32s2, esp32s3))] {
                 ($peripherals.GPIO9, $peripherals.GPIO10)
             } else if #[cfg(esp32)] {
-                ($peripherals.GPIO26, $peripherals.GPIO27)
+                ($peripherals.GPIO2, $peripherals.GPIO4)
             } else {
                 ($peripherals.GPIO2, $peripherals.GPIO3)
             }
@@ -83,15 +107,25 @@ macro_rules! unconnected_pin {
     }};
 }
 
+#[macro_export]
+macro_rules! mk_static {
+    ($t:ty,$val:expr) => {{
+        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
+        #[deny(unused_attributes)]
+        let x = STATIC_CELL.uninit().write(($val));
+        x
+    }};
+}
+
 // A simple looping executor to test async code without esp-hal-embassy (which
 // needs `esp-hal/unstable`).
 #[cfg(not(feature = "embassy"))]
 mod executor {
     use core::marker::PhantomData;
 
-    use embassy_executor::{raw, Spawner};
+    use embassy_executor::{Spawner, raw};
 
-    #[export_name = "__pender"]
+    #[unsafe(export_name = "__pender")]
     fn __pender(_: *mut ()) {}
 
     pub struct Executor {
@@ -118,6 +152,6 @@ mod executor {
 }
 
 #[cfg(feature = "embassy")]
-pub use esp_hal_embassy::Executor;
+pub use esp_rtos::embassy::Executor;
 #[cfg(not(feature = "embassy"))]
 pub use executor::Executor;
