@@ -8,7 +8,7 @@ exclude  = [
     "esp-config",
     "esp-hal",
     "esp-hal-procmacros",
-    "esp-rom-sys",
+#    "esp-rom-sys",
     "esp-lp-hal",
     "esp-metadata",
     "esp-metadata-generated",
