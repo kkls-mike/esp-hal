@@ -161,7 +161,7 @@ pub(crate) fn esp32h2_rtc_apb_freq_update(apb_freq: ApbClock) {
 
     LP_AON::regs()
         .store5()
-        .modify(|_, w| unsafe { w.lp_aon_store5().bits(value) });
+        .modify(|_, w| unsafe { w.data().bits(value) });
 }
 
 fn clk_ll_cpu_set_divider(divider: u32) {
@@ -221,11 +221,7 @@ fn regi2c_enable_block(block: u8) -> usize {
         }
     });
 
-    if i2c_sel {
-        0
-    } else {
-        1
-    }
+    if i2c_sel { 0 } else { 1 }
 }
 
 pub(crate) fn regi2c_write_mask(block: u8, _host_id: u8, reg_add: u8, msb: u8, lsb: u8, data: u8) {
@@ -286,16 +282,14 @@ fn ble_ieee802154_clock_enable(en: bool) {
         .modify(|_, w| w.clk_coex_en().bit(en));
 }
 
+#[cfg_attr(not(feature = "unstable"), expect(unused))]
 pub(super) fn enable_bt(en: bool) {
     ble_ieee802154_clock_enable(en);
 }
 
+#[cfg_attr(not(feature = "unstable"), expect(unused))]
 pub(super) fn enable_ieee802154(en: bool) {
     ble_ieee802154_clock_enable(en);
-}
-
-pub(super) fn reset_mac() {
-    // empty
 }
 
 pub(super) fn init_clocks() {

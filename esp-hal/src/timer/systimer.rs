@@ -17,15 +17,15 @@
 //! [`PeriodicTimer`](super::PeriodicTimer). Using the System timer directly is
 //! only possible through the low level [`Timer`](crate::timer::Timer) trait.
 
-use core::fmt::Debug;
+use core::{fmt::Debug, marker::PhantomData};
+
+use esp_sync::RawMutex;
 
 use super::{Error, Timer as _};
 use crate::{
     asynch::AtomicWaker,
     interrupt::{self, InterruptHandler},
-    peripheral::Peripheral,
     peripherals::{Interrupt, SYSTIMER},
-    sync::{lock, RawMutex},
     system::{Cpu, Peripheral as PeripheralEnable, PeripheralClockControl},
     time::{Duration, Instant},
 };
@@ -44,18 +44,18 @@ pub enum UnitConfig {
 }
 
 /// System Timer driver.
-pub struct SystemTimer {
+pub struct SystemTimer<'d> {
     /// Alarm 0.
-    pub alarm0: Alarm,
+    pub alarm0: Alarm<'d>,
 
     /// Alarm 1.
-    pub alarm1: Alarm,
+    pub alarm1: Alarm<'d>,
 
     /// Alarm 2.
-    pub alarm2: Alarm,
+    pub alarm2: Alarm<'d>,
 }
 
-impl SystemTimer {
+impl<'d> SystemTimer<'d> {
     cfg_if::cfg_if! {
         if #[cfg(esp32s2)] {
             /// Bitmask to be applied to the raw register value.
@@ -96,21 +96,22 @@ impl SystemTimer {
     }
 
     /// Create a new instance.
-    pub fn new(_systimer: SYSTIMER) -> Self {
+    pub fn new(_systimer: SYSTIMER<'d>) -> Self {
         // Don't reset Systimer as it will break `time::Instant::now`, only enable it
         PeripheralClockControl::enable(PeripheralEnable::Systimer);
 
-        #[cfg(soc_etm)]
+        #[cfg(soc_has_etm)]
         etm::enable_etm();
 
         Self {
-            alarm0: Alarm::new(0),
-            alarm1: Alarm::new(1),
-            alarm2: Alarm::new(2),
+            alarm0: Alarm::new(Comparator::Comparator0),
+            alarm1: Alarm::new(Comparator::Comparator1),
+            alarm2: Alarm::new(Comparator::Comparator2),
         }
     }
 
     /// Get the current count of the given unit in the System Timer.
+    #[inline]
     pub fn unit_value(unit: Unit) -> u64 {
         // This should be safe to access from multiple contexts
         // worst case scenario the second accessor ends up reading
@@ -126,8 +127,7 @@ impl SystemTimer {
     ///
     /// # Safety
     ///
-    /// - Disabling a `Unit` whilst [`Alarm`]s are using it will affect the
-    ///   [`Alarm`]s operation.
+    /// - Disabling a `Unit` whilst [`Alarm`]s are using it will affect the [`Alarm`]s operation.
     /// - Disabling Unit0 will affect [`Instant::now`].
     pub unsafe fn configure_unit(unit: Unit, config: UnitConfig) {
         unit.configure(config)
@@ -141,8 +141,7 @@ impl SystemTimer {
     ///
     /// # Safety
     ///
-    /// - Modifying a unit's count whilst [`Alarm`]s are using it may cause
-    ///   unexpected behaviour
+    /// - Modifying a unit's count whilst [`Alarm`]s are using it may cause unexpected behaviour
     /// - Any modification of the unit0 count will affect [`Instant::now`]
     pub unsafe fn set_unit_value(unit: Unit, value: u64) {
         unit.set_count(value)
@@ -171,7 +170,7 @@ impl Unit {
 
     #[cfg(not(esp32s2))]
     fn configure(&self, config: UnitConfig) {
-        lock(&CONF_LOCK, || {
+        CONF_LOCK.lock(|| {
             SYSTIMER::regs().conf().modify(|_, w| match config {
                 UnitConfig::Disabled => match self.channel() {
                     0 => w.timer_unit0_work_en().clear_bit(),
@@ -235,6 +234,7 @@ impl Unit {
         }
     }
 
+    #[inline]
     fn read_count(&self) -> u64 {
         // This can be a shared reference as long as this type isn't Sync.
 
@@ -263,32 +263,68 @@ impl Unit {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+enum Comparator {
+    Comparator0,
+    Comparator1,
+    Comparator2,
+}
+
 /// An alarm unit
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Alarm {
-    comp: u8,
+pub struct Alarm<'d> {
+    comp: Comparator,
     unit: Unit,
+    _lifetime: PhantomData<&'d mut ()>,
 }
 
-impl Alarm {
-    const fn new(comp: u8) -> Self {
+impl Alarm<'_> {
+    const fn new(comp: Comparator) -> Self {
         Alarm {
             comp,
             unit: Unit::Unit0,
+            _lifetime: PhantomData,
         }
+    }
+
+    /// Unsafely clone this peripheral reference.
+    ///
+    /// # Safety
+    ///
+    /// You must ensure that you're only using one instance of this type at a
+    /// time.
+    pub unsafe fn clone_unchecked(&self) -> Self {
+        Self {
+            comp: self.comp,
+            unit: self.unit,
+            _lifetime: PhantomData,
+        }
+    }
+
+    /// Creates a new peripheral reference with a shorter lifetime.
+    ///
+    /// Use this method if you would like to keep working with the peripheral
+    /// after you dropped the driver that consumes this.
+    ///
+    /// See [Peripheral singleton] section for more information.
+    ///
+    /// [Peripheral singleton]: crate#peripheral-singletons
+    pub fn reborrow(&mut self) -> Alarm<'_> {
+        unsafe { self.clone_unchecked() }
     }
 
     /// Returns the comparator's number.
     #[inline]
     fn channel(&self) -> u8 {
-        self.comp
+        self.comp as u8
     }
 
     /// Enables/disables the comparator. If enabled, this means
     /// it will generate interrupt based on its configuration.
     fn set_enable(&self, enable: bool) {
-        lock(&CONF_LOCK, || {
+        CONF_LOCK.lock(|| {
             #[cfg(not(esp32s2))]
             SYSTIMER::regs().conf().modify(|_, w| match self.channel() {
                 0 => w.target0_work_en().bit(enable),
@@ -413,14 +449,14 @@ impl Alarm {
             // checks if an interrupt is active before calling the associated
             // handler functions.
 
-            static mut HANDLERS: [Option<extern "C" fn()>; 3] = [None, None, None];
+            static mut HANDLERS: [Option<crate::interrupt::IsrCallback>; 3] = [None, None, None];
 
             #[crate::ram]
-            unsafe extern "C" fn _handle_interrupt<const CH: u8>() {
+            extern "C" fn _handle_interrupt<const CH: u8>() {
                 if SYSTIMER::regs().int_raw().read().target(CH).bit_is_set() {
                     let handler = unsafe { HANDLERS[CH as usize] };
                     if let Some(handler) = handler {
-                        handler();
+                        (handler.aligned_ptr())();
                     }
                 }
             }
@@ -433,7 +469,7 @@ impl Alarm {
                     2 => _handle_interrupt::<2>,
                     _ => unreachable!(),
                 };
-                interrupt::bind_interrupt(interrupt, handler);
+                interrupt::bind_interrupt(interrupt, crate::interrupt::IsrCallback::new(handler));
             }
         }
         unwrap!(interrupt::enable(interrupt, handler.priority()));
@@ -451,7 +487,7 @@ enum ComparatorMode {
     Target,
 }
 
-impl super::Timer for Alarm {
+impl super::Timer for Alarm<'_> {
     fn start(&self) {
         self.set_enable(true);
     }
@@ -541,7 +577,7 @@ impl super::Timer for Alarm {
     }
 
     fn enable_interrupt(&self, state: bool) {
-        lock(&INT_ENA_LOCK, || {
+        INT_ENA_LOCK.lock(|| {
             SYSTIMER::regs()
                 .int_ena()
                 .modify(|_, w| w.target(self.channel()).bit(state));
@@ -589,25 +625,15 @@ impl super::Timer for Alarm {
     }
 }
 
-impl Peripheral for Alarm {
-    type P = Self;
-
-    #[inline]
-    unsafe fn clone_unchecked(&self) -> Self::P {
-        Alarm {
-            comp: self.comp,
-            unit: self.unit,
-        }
-    }
-}
-
-impl crate::private::Sealed for Alarm {}
+impl crate::private::Sealed for Alarm<'_> {}
 
 static CONF_LOCK: RawMutex = RawMutex::new();
 static INT_ENA_LOCK: RawMutex = RawMutex::new();
 
 // Async functionality of the system timer.
 mod asynch {
+    use core::marker::PhantomData;
+
     use procmacros::handler;
 
     use super::*;
@@ -616,39 +642,41 @@ mod asynch {
     const NUM_ALARMS: usize = 3;
     static WAKERS: [AtomicWaker; NUM_ALARMS] = [const { AtomicWaker::new() }; NUM_ALARMS];
 
-    pub(super) fn waker(alarm: &Alarm) -> &AtomicWaker {
+    pub(super) fn waker(alarm: &Alarm<'_>) -> &'static AtomicWaker {
         &WAKERS[alarm.channel() as usize]
     }
 
     #[inline]
-    fn handle_alarm(alarm: u8) {
+    fn handle_alarm(comp: Comparator) {
         Alarm {
-            comp: alarm,
+            comp,
             unit: Unit::Unit0,
+            _lifetime: PhantomData,
         }
         .enable_interrupt(false);
 
-        WAKERS[alarm as usize].wake();
+        WAKERS[comp as usize].wake();
     }
 
     #[handler]
     pub(crate) fn target0_handler() {
-        handle_alarm(0);
+        handle_alarm(Comparator::Comparator0);
     }
 
     #[handler]
     pub(crate) fn target1_handler() {
-        handle_alarm(1);
+        handle_alarm(Comparator::Comparator1);
     }
 
     #[handler]
     pub(crate) fn target2_handler() {
-        handle_alarm(2);
+        handle_alarm(Comparator::Comparator2);
     }
 }
 
-#[cfg(soc_etm)]
+#[cfg(soc_has_etm)]
 pub mod etm {
+    #![cfg_attr(docsrs, procmacros::doc_replace)]
     //! # Event Task Matrix Function
     //!
     //! ## Overview
@@ -657,12 +685,11 @@ pub mod etm {
     //! allows the system timer’s ETM events to trigger any peripherals’ ETM
     //! tasks.
     //!
-    //!    The system timer can generate the following ETM events:
-    //!    - SYSTIMER_EVT_CNT_CMPx: Indicates the alarm pulses generated by
-    //!      COMPx
+    //! The system timer can generate the following ETM events:
+    //! - SYSTIMER_EVT_CNT_CMPx: Indicates the alarm pulses generated by COMPx
     //! ## Example
     //! ```rust, no_run
-    #![doc = crate::before_snippet!()]
+    //! # {before_snippet}
     //! # use esp_hal::timer::systimer::{etm::Event, SystemTimer};
     //! # use esp_hal::timer::PeriodicTimer;
     //! # use esp_hal::etm::Etm;
@@ -672,14 +699,14 @@ pub mod etm {
     //! #     Pull,
     //! # };
     //! let syst = SystemTimer::new(peripherals.SYSTIMER);
-    //! let etm = Etm::new(peripherals.SOC_ETM);
+    //! let etm = Etm::new(peripherals.ETM);
     //! let gpio_ext = Channels::new(peripherals.GPIO_SD);
     //! let alarm0 = syst.alarm0;
     //! let mut led = peripherals.GPIO1;
     //!
     //! let timer_event = Event::new(&alarm0);
     //! let led_task = gpio_ext.channel0_task.toggle(
-    //!     &mut led,
+    //!     led,
     //!     OutputConfig {
     //!         open_drain: false,
     //!         pull: Pull::None,
@@ -687,14 +714,12 @@ pub mod etm {
     //!     },
     //! );
     //!
-    //! let _configured_etm_channel = etm.channel0.setup(&timer_event,
-    //! &led_task);
+    //! let _configured_etm_channel = etm.channel0.setup(&timer_event, &led_task);
     //!
     //! let timer = PeriodicTimer::new(alarm0);
     //! // configure the timer as usual
     //! // when it fires it will toggle the GPIO
-    //! # Ok(())
-    //! # }
+    //! # {after_snippet}
     //! ```
 
     use super::*;
@@ -706,7 +731,7 @@ pub mod etm {
 
     impl Event {
         /// Creates an ETM event from the given [Alarm]
-        pub fn new(alarm: &Alarm) -> Self {
+        pub fn new(alarm: &Alarm<'_>) -> Self {
             Self {
                 id: 50 + alarm.channel(),
             }

@@ -8,10 +8,10 @@
 use core::{
     marker::PhantomData,
     mem::{ManuallyDrop, MaybeUninit},
+    sync::atomic::{AtomicPtr, Ordering},
 };
 
 use crate::{
-    peripheral::{Peripheral, PeripheralRef},
     peripherals::{CPU_CTRL, DPORT, LPWR, SPI0},
     system::Cpu,
 };
@@ -47,7 +47,10 @@ impl<const SIZE: usize> Stack<SIZE> {
     /// Construct a stack of length SIZE, uninitialized
     #[instability::unstable]
     pub const fn new() -> Stack<SIZE> {
-        ::core::assert!(SIZE % 16 == 0); // Make sure stack top is aligned, too.
+        const {
+            // Make sure stack top is aligned, too.
+            ::core::assert!(SIZE.is_multiple_of(16));
+        }
 
         Stack {
             mem: MaybeUninit::uninit(),
@@ -75,8 +78,9 @@ impl<const SIZE: usize> Stack<SIZE> {
 
 // Pointer to the closure that will be executed on the second core. The closure
 // is copied to the core's stack.
-static mut START_CORE1_FUNCTION: Option<*mut ()> = None;
-static mut APP_CORE_STACK_TOP: Option<*mut u32> = None;
+static START_CORE1_FUNCTION: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+static APP_CORE_STACK_TOP: AtomicPtr<u32> = AtomicPtr::new(core::ptr::null_mut());
+static APP_CORE_STACK_GUARD: AtomicPtr<u32> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Will park the APP (second) core when dropped
 #[must_use = "Dropping this guard will park the APP core"]
@@ -100,11 +104,12 @@ pub enum Error {
     CoreAlreadyRunning,
 }
 
+#[procmacros::doc_replace]
 /// Control CPU Cores
 ///
 /// ## Examples
 /// ```rust, no_run
-#[doc = crate::before_snippet!()]
+/// # {before_snippet}
 /// # use esp_hal::delay::Delay;
 /// # use esp_hal::system::{CpuControl, Stack};
 /// # use core::{cell::RefCell, ptr::addr_of_mut};
@@ -118,11 +123,8 @@ pub enum Error {
 /// let cpu1_fnctn = || {
 ///     cpu1_task(&delay, &counter);
 /// };
-/// let _guard = cpu_control
-///     .start_app_core(
-///         unsafe { &mut *addr_of_mut!(APP_CORE_STACK) },
-///         cpu1_fnctn
-///     )?;
+/// let _guard =
+///     cpu_control.start_app_core(unsafe { &mut *addr_of_mut!(APP_CORE_STACK) }, cpu1_fnctn)?;
 ///
 /// loop {
 ///     delay.delay(Duration::from_secs(1));
@@ -134,10 +136,7 @@ pub enum Error {
 /// # use esp_hal::delay::Delay;
 /// # use core::cell::RefCell;
 ///
-/// fn cpu1_task(
-///     delay: &Delay,
-///     counter: &critical_section::Mutex<RefCell<i32>>,
-/// ) -> ! {
+/// fn cpu1_task(delay: &Delay, counter: &critical_section::Mutex<RefCell<i32>>) -> ! {
 ///     loop {
 ///         delay.delay(Duration::from_millis(500));
 ///
@@ -150,7 +149,7 @@ pub enum Error {
 /// ```
 #[instability::unstable]
 pub struct CpuControl<'d> {
-    _cpu_control: PeripheralRef<'d, CPU_CTRL>,
+    _cpu_control: CPU_CTRL<'d>,
 }
 
 unsafe fn internal_park_core(core: Cpu, park: bool) {
@@ -160,28 +159,71 @@ unsafe fn internal_park_core(core: Cpu, park: bool) {
         Cpu::ProCpu => {
             LPWR::regs()
                 .sw_cpu_stall()
-                .modify(|_, w| w.sw_stall_procpu_c1().bits(c1_value));
+                .modify(|_, w| unsafe { w.sw_stall_procpu_c1().bits(c1_value) });
             LPWR::regs()
                 .options0()
-                .modify(|_, w| w.sw_stall_procpu_c0().bits(c0_value));
+                .modify(|_, w| unsafe { w.sw_stall_procpu_c0().bits(c0_value) });
         }
         Cpu::AppCpu => {
             LPWR::regs()
                 .sw_cpu_stall()
-                .modify(|_, w| w.sw_stall_appcpu_c1().bits(c1_value));
+                .modify(|_, w| unsafe { w.sw_stall_appcpu_c1().bits(c1_value) });
             LPWR::regs()
                 .options0()
-                .modify(|_, w| w.sw_stall_appcpu_c0().bits(c0_value));
+                .modify(|_, w| unsafe { w.sw_stall_appcpu_c0().bits(c0_value) });
         }
     }
+}
+
+/// Returns `true` if the specified core is currently running (not stalled).
+#[instability::unstable]
+pub fn is_running(core: Cpu) -> bool {
+    if core == Cpu::AppCpu {
+        let dport = DPORT::regs();
+        // DPORT_APPCPU_CLKGATE_EN in APPCPU_CTRL_B bit 0 -> needs to be 1 to even be enabled
+        // DPORT_APPCPU_RUNSTALL in APPCPU_CTRL_C bit 0 -> needs to be 0 to not stall
+        if dport
+            .appcpu_ctrl_b()
+            .read()
+            .appcpu_clkgate_en()
+            .bit_is_clear()
+            || dport.appcpu_ctrl_c().read().appcpu_runstall().bit_is_set()
+        {
+            // If the core is not enabled or is stallled, we can take this shortcut
+            return false;
+        }
+    }
+
+    // sw_stall_appcpu_c1[5:0],  sw_stall_appcpu_c0[1:0]} == 0x86 will stall APP CPU
+    // sw_stall_procpu_c1[5:0],  reg_sw_stall_procpu_c0[1:0]} == 0x86 will stall PRO CPU
+    let is_stalled = match core {
+        Cpu::ProCpu => {
+            let c1 = LPWR::regs()
+                .sw_cpu_stall()
+                .read()
+                .sw_stall_procpu_c1()
+                .bits();
+            let c0 = LPWR::regs().options0().read().sw_stall_procpu_c0().bits();
+            (c1 << 2) | c0
+        }
+        Cpu::AppCpu => {
+            let c1 = LPWR::regs()
+                .sw_cpu_stall()
+                .read()
+                .sw_stall_appcpu_c1()
+                .bits();
+            let c0 = LPWR::regs().options0().read().sw_stall_appcpu_c0().bits();
+            (c1 << 2) | c0
+        }
+    };
+
+    is_stalled != 0x86
 }
 
 impl<'d> CpuControl<'d> {
     /// Creates a new instance of `CpuControl`.
     #[instability::unstable]
-    pub fn new(cpu_control: impl Peripheral<P = CPU_CTRL> + 'd) -> CpuControl<'d> {
-        crate::into_ref!(cpu_control);
-
+    pub fn new(cpu_control: CPU_CTRL<'d>) -> CpuControl<'d> {
         CpuControl {
             _cpu_control: cpu_control,
         }
@@ -195,7 +237,9 @@ impl<'d> CpuControl<'d> {
     /// currently executing their code.
     #[instability::unstable]
     pub unsafe fn park_core(&mut self, core: Cpu) {
-        internal_park_core(core, true);
+        unsafe {
+            internal_park_core(core, true);
+        }
     }
 
     /// Unpark the given core
@@ -276,31 +320,41 @@ impl<'d> CpuControl<'d> {
         F: FnOnce(),
     {
         // disables interrupts
-        xtensa_lx::interrupt::set_mask(0);
+        unsafe {
+            xtensa_lx::interrupt::set_mask(0);
+        }
 
         // reset cycle compare registers
         xtensa_lx::timer::set_ccompare0(0);
         xtensa_lx::timer::set_ccompare1(0);
         xtensa_lx::timer::set_ccompare2(0);
 
-        extern "C" {
+        unsafe extern "C" {
             static mut _init_start: u32;
         }
 
+        // set vector table and stack pointer
         unsafe {
-            // move vec table
-            let base = core::ptr::addr_of!(_init_start);
-            core::arch::asm!("wsr.vecbase {0}", in(reg) base, options(nostack));
-        }
+            xtensa_lx::set_vecbase(&raw const _init_start);
+            xtensa_lx::set_stack_pointer(APP_CORE_STACK_TOP.load(Ordering::Acquire));
 
-        // switch to new stack
-        xtensa_lx::set_stack_pointer(unwrap!(APP_CORE_STACK_TOP));
+            #[cfg(all(feature = "rt", stack_guard_monitoring))]
+            {
+                let stack_guard = APP_CORE_STACK_GUARD.load(Ordering::Acquire);
+                stack_guard.write_volatile(esp_config::esp_config_int!(
+                    u32,
+                    "ESP_HAL_CONFIG_STACK_GUARD_VALUE"
+                ));
+                // setting 0 effectively disables the functionality
+                crate::debugger::set_stack_watchpoint(stack_guard as usize);
+            }
+        }
 
         // Trampoline to run from the new stack.
         // start_core1_run should _NEVER_ be inlined
         // as we rely on the function call to use
         // the new stack.
-        Self::start_core1_run::<F>()
+        unsafe { Self::start_core1_run::<F>() }
     }
 
     /// Run the core1 closure.
@@ -309,16 +363,15 @@ impl<'d> CpuControl<'d> {
     where
         F: FnOnce(),
     {
-        #[allow(static_mut_refs)] // FIXME
-        match START_CORE1_FUNCTION.take() {
-            Some(entry) => {
-                let entry = unsafe { ManuallyDrop::take(&mut *entry.cast::<ManuallyDrop<F>>()) };
-                entry();
-                loop {
-                    unsafe { internal_park_core(Cpu::current(), true) };
-                }
+        let entry = START_CORE1_FUNCTION.load(Ordering::Acquire);
+        debug_assert!(!entry.is_null());
+
+        unsafe {
+            let entry = ManuallyDrop::take(&mut *entry.cast::<ManuallyDrop<F>>());
+            entry();
+            loop {
+                internal_park_core(Cpu::current(), true);
             }
-            None => panic!("No start function set"),
         }
     }
 
@@ -332,6 +385,37 @@ impl<'d> CpuControl<'d> {
     pub fn start_app_core<'a, const SIZE: usize, F>(
         &mut self,
         stack: &'static mut Stack<SIZE>,
+        entry: F,
+    ) -> Result<AppCoreGuard<'a>, Error>
+    where
+        F: FnOnce(),
+        F: Send + 'a,
+    {
+        cfg_if::cfg_if! {
+            if #[cfg(all(stack_guard_monitoring))] {
+                let stack_guard_offset = Some(esp_config::esp_config_int!(
+                    usize,
+                    "ESP_HAL_CONFIG_STACK_GUARD_OFFSET"
+                ));
+            } else {
+                let stack_guard_offset = None;
+            }
+        };
+
+        self.start_app_core_with_stack_guard_offset(stack, stack_guard_offset, entry)
+    }
+
+    /// Start the APP (second) core.
+    ///
+    /// The second core will start running the closure `entry`. Note that if the
+    /// closure exits, the core will be parked.
+    ///
+    /// Dropping the returned guard will park the core.
+    #[instability::unstable]
+    pub fn start_app_core_with_stack_guard_offset<'a, const SIZE: usize, F>(
+        &mut self,
+        stack: &'static mut Stack<SIZE>,
+        stack_guard_offset: Option<usize>,
         entry: F,
     ) -> Result<AppCoreGuard<'a>, Error>
     where
@@ -367,8 +451,16 @@ impl<'d> CpuControl<'d> {
             entry_dst.write(entry);
 
             let entry_fn = entry_dst.cast::<()>();
-            START_CORE1_FUNCTION = Some(entry_fn);
-            APP_CORE_STACK_TOP = Some(stack.top());
+            START_CORE1_FUNCTION.store(entry_fn, Ordering::Release);
+            APP_CORE_STACK_TOP.store(stack.top(), Ordering::Release);
+            let stack_guard = if let Some(stack_guard_offset) = stack_guard_offset {
+                assert!(stack_guard_offset.is_multiple_of(4));
+                assert!(stack_guard_offset <= stack.len() - 4);
+                stack_bottom.byte_add(stack_guard_offset)
+            } else {
+                core::ptr::null_mut()
+            };
+            APP_CORE_STACK_GUARD.store(stack_guard.cast(), Ordering::Release);
         }
 
         dport_control.appcpu_ctrl_d().write(|w| unsafe {
