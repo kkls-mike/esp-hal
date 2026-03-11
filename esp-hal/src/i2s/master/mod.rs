@@ -49,24 +49,24 @@
 //!
 //! TDM Philips mode pulls the WS line low one BCK period before the first data bit of the first
 //! slot is sent and holds it low for 50% of the frame.
-#![doc = include_str!("tdm_slot_philips.svg")]
+#![doc = include_str!("../tdm_slot_philips.svg")]
 //! #### TDM MSB Standard
 //!
 //! MSB (most-significant bit) mode is similar to Philips mode, except the WS line is pulled low at
 //! the same time the first data bit of the first slot is sent. It is held low for 50% of the frame.
-#![doc = include_str!("tdm_slot_msb.svg")]
+#![doc = include_str!("../tdm_slot_msb.svg")]
 //! #### TDM PCM Short Standard
 //!
 //! PCM (pulse-code modulation) short mode pulls the WS line *high* one BCK period before the first
 //! data bit of the first slot is sent, keeps it high for one BCK, then pulls it low for the
 //! remainder of the frame.
-#![doc = include_str!("tdm_slot_pcm_short.svg")]
+#![doc = include_str!("../tdm_slot_pcm_short.svg")]
 //! #### TDM PCM Long Standard
 //!
 //! PCM long mode pulls the WS line *high* one BCK period before the first data bit of the first
 //! slot is sent, keeps it high until just before the last data bit of the first slot is sent, then
 //! pulls it low for the remainder of the frame.
-#![doc = include_str!("tdm_slot_pcm_long.svg")]
+#![doc = include_str!("../tdm_slot_pcm_long.svg")]
 //! Diagrams from _ESP-IDF Programming Guide_; rendered by Wavedrom.
 //!
 //! ## Examples
